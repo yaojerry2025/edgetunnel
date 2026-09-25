@@ -155,6 +155,8 @@ export default {
                 SCV = env.SCV || SCV;
                 if (!SCV || SCV == '0' || SCV == 'false') allowInsecure = '';
                 else SCV = 'true';
+                const speedTestResponse = await handleSpeedTest(request, url);
+                if (speedTestResponse) return speedTestResponse;
                 const 路径 = url.pathname.toLowerCase();
                 if (路径 == '/') {
                     if (env.URL302) return Response.redirect(env.URL302, 302);
@@ -4538,33 +4540,475 @@ async function getUsage(accountId, email, apikey, apitoken, all = 100000) {
     }
 }
 
+async function handleSpeedTest(request, url) {
+    const pathname = url.pathname.toLowerCase();
+
+    if (pathname === '/speedtest/ping') {
+        return new Response(null, {
+            status: 204,
+            headers: {
+                'Cache-Control': 'no-store, no-cache, must-revalidate'
+            }
+        });
+    }
+
+    if (pathname === '/speedtest/info') {
+        const cf = request.cf || {};
+
+        return new Response(JSON.stringify({
+            colo: cf.colo || '',
+            country: cf.country || ''
+        }), {
+            status: 200,
+            headers: {
+                'Content-Type': 'application/json; charset=UTF-8',
+                'Cache-Control': 'no-store'
+            }
+        });
+    }
+
+    if (pathname === '/speedtest/download') {
+        const requested =
+            Number(url.searchParams.get('bytes')) || (4 * 1024 * 1024);
+
+        const total =
+            Math.max(64 * 1024, Math.min(requested, 8 * 1024 * 1024));
+
+        const chunkSize = 256 * 1024;
+        const chunk = new Uint8Array(chunkSize);
+
+        for (let i = 0; i < chunk.length; i++) {
+            chunk[i] = (i * 31 + 17) & 255;
+        }
+
+        let sent = 0;
+
+        const stream = new ReadableStream({
+            pull(controller) {
+                if (sent >= total) {
+                    controller.close();
+                    return;
+                }
+
+                const remain = total - sent;
+                const out =
+                    remain >= chunkSize
+                        ? chunk
+                        : chunk.subarray(0, remain);
+
+                controller.enqueue(out);
+                sent += out.byteLength;
+            }
+        });
+
+        return new Response(stream, {
+            status: 200,
+            headers: {
+                'Content-Type': 'application/octet-stream',
+                'Content-Length': String(total),
+                'Cache-Control':
+                    'no-store, no-cache, must-revalidate, no-transform'
+            }
+        });
+    }
+
+    if (
+        pathname === '/speedtest/upload' &&
+        request.method === 'POST'
+    ) {
+        const body = await request.arrayBuffer();
+
+        return new Response(
+            JSON.stringify({ received: body.byteLength }),
+            {
+                status: 200,
+                headers: {
+                    'Content-Type':
+                        'application/json; charset=UTF-8',
+                    'Cache-Control': 'no-store'
+                }
+            }
+        );
+    }
+
+    return null;
+}
 async function nginx() {
     const text = `
-	<!DOCTYPE html>
-	<html>
-	<head>
-	<title>Welcome to nginx!</title>
-	<style>
-		body {
-			width: 35em;
-			margin: 0 auto;
-			font-family: Tahoma, Verdana, Arial, sans-serif;
-		}
-	</style>
-	</head>
-	<body>
-	<h1>Welcome to nginx!</h1>
-	<p>If you see this page, the nginx web server is successfully installed and
-	working. Further configuration is required.</p>
-	
-	<p>For online documentation and support please refer to
-	<a href="http://nginx.org/">nginx.org</a>.<br/>
-	Commercial support is available at
-	<a href="http://nginx.com/">nginx.com</a>.</p>
-	
-	<p><em>Thank you for using nginx.</em></p>
-	</body>
-	</html>
-	`
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>网络测速</title>
+<style>
+*{box-sizing:border-box}
+body{
+    margin:0;
+    background:#f1f1f1;
+    color:#222;
+    font-family:Arial,"Microsoft YaHei",sans-serif;
+    font-size:14px
+}
+.wrap{
+    width:760px;
+    max-width:94%;
+    margin:38px auto;
+    background:#fff;
+    border:1px solid #bbb
+}
+.head{
+    background:#e7e7e7;
+    border-bottom:1px solid #bbb;
+    padding:14px 18px
+}
+.head h1{
+    margin:0;
+    font-size:22px;
+    font-weight:normal
+}
+.head p{
+    margin:7px 0 0;
+    color:#666;
+    font-size:12px
+}
+.body{padding:22px}
+.info{
+    border:1px solid #ccc;
+    background:#fafafa;
+    padding:12px 14px;
+    margin-bottom:18px;
+    line-height:1.7
+}
+table{
+    width:100%;
+    border-collapse:collapse;
+    margin-bottom:20px
+}
+th,td{
+    border:1px solid #bbb;
+    padding:13px 8px;
+    text-align:center
+}
+th{
+    background:#eee;
+    font-weight:normal;
+    color:#555
+}
+.num{
+    font-size:26px;
+    font-family:Consolas,monospace
+}
+.unit{
+    font-size:12px;
+    color:#777;
+    margin-left:3px
+}
+.control{
+    text-align:center;
+    padding:8px 0 4px
+}
+button{
+    min-width:150px;
+    height:42px;
+    border:1px solid #777;
+    background:#e5e5e5;
+    color:#111;
+    font-size:16px;
+    cursor:pointer
+}
+button:hover{background:#d9d9d9}
+button:disabled{
+    color:#777;
+    cursor:default
+}
+.status{
+    margin-top:12px;
+    color:#555;
+    min-height:22px
+}
+.foot{
+    border-top:1px solid #ccc;
+    background:#f7f7f7;
+    padding:10px 16px;
+    color:#888;
+    font-size:11px;
+    display:flex;
+    justify-content:space-between;
+    gap:10px
+}
+@media(max-width:620px){
+    .wrap{margin:16px auto}
+    .body{padding:12px}
+    th,td{padding:10px 4px}
+    .num{font-size:21px}
+    .foot{display:block}
+    .foot span{
+        display:block;
+        margin:3px 0
+    }
+}
+</style>
+</head>
+
+<body>
+
+<div class="wrap">
+
+    <div class="head">
+        <h1>网络连接速度测试</h1>
+        <p>用于检测当前网络延迟及上传、下载速度</p>
+    </div>
+
+    <div class="body">
+
+        <div class="info">
+            测试节点：<span id="edge">自动选择</span><br>
+            测试说明：测速结果会受到网络负载、无线信号、设备性能等因素影响，仅供参考。
+        </div>
+
+        <table>
+            <tr>
+                <th>网络延迟</th>
+                <th>网络抖动</th>
+                <th>下载速度</th>
+                <th>上传速度</th>
+            </tr>
+
+            <tr>
+                <td>
+                    <span class="num" id="ping">--</span>
+                    <span class="unit">ms</span>
+                </td>
+
+                <td>
+                    <span class="num" id="jitter">--</span>
+                    <span class="unit">ms</span>
+                </td>
+
+                <td>
+                    <span class="num" id="down">--</span>
+                    <span class="unit">Mbps</span>
+                </td>
+
+                <td>
+                    <span class="num" id="up">--</span>
+                    <span class="unit">Mbps</span>
+                </td>
+            </tr>
+        </table>
+
+        <div class="control">
+            <button id="start" type="button">开始测速</button>
+            <div class="status" id="status">等待开始</div>
+        </div>
+
+    </div>
+
+    <div class="foot">
+        <span>网络测速工具</span>
+        <span>浏览器测速</span>
+    </div>
+
+</div>
+
+<script>
+(function(){
+
+    var start = document.getElementById('start');
+    var status = document.getElementById('status');
+
+    var ids = {
+        ping: document.getElementById('ping'),
+        jitter: document.getElementById('jitter'),
+        down: document.getElementById('down'),
+        up: document.getElementById('up')
+    };
+
+    function setStatus(s) {
+        status.textContent = s;
+    }
+
+    function setBusy(on) {
+        start.disabled = on;
+        start.textContent = on ? '测速中...' : '开始测速';
+    }
+
+    async function pingTest() {
+
+        var samples = [];
+
+        for (var i = 0; i < 7; i++) {
+
+            var t = performance.now();
+
+            await fetch(
+                '/speedtest/ping?n=' + Date.now() + '-' + i,
+                { cache:'no-store' }
+            );
+
+            var d = performance.now() - t;
+
+            if (i > 0) {
+                samples.push(d);
+            }
+        }
+
+        var avg =
+            samples.reduce(function(a,b){
+                return a+b;
+            },0) / samples.length;
+
+        var diffs = [];
+
+        for (var j = 1; j < samples.length; j++) {
+            diffs.push(
+                Math.abs(samples[j] - samples[j-1])
+            );
+        }
+
+        var jitter =
+            diffs.reduce(function(a,b){
+                return a+b;
+            },0) / diffs.length;
+
+        return [avg, jitter];
+    }
+
+    async function downloadTest() {
+
+        var bytes = 4 * 1024 * 1024;
+
+        var t = performance.now();
+
+        var response = await fetch(
+            '/speedtest/download?bytes=' +
+            bytes +
+            '&n=' +
+            Date.now(),
+            { cache:'no-store' }
+        );
+
+        var body = await response.arrayBuffer();
+
+        var seconds =
+            (performance.now() - t) / 1000;
+
+        return (
+            body.byteLength *
+            8 /
+            seconds /
+            1000000
+        );
+    }
+
+    async function uploadTest() {
+
+        var bytes = 1024 * 1024;
+
+        var payload =
+            new Uint8Array(bytes);
+
+        var t = performance.now();
+
+        await fetch(
+            '/speedtest/upload?n=' +
+            Date.now(),
+            {
+                method:'POST',
+                body:payload,
+                cache:'no-store'
+            }
+        );
+
+        var seconds =
+            (performance.now() - t) / 1000;
+
+        return (
+            bytes *
+            8 /
+            seconds /
+            1000000
+        );
+    }
+
+    async function run() {
+
+        setBusy(true);
+
+        try {
+
+            ids.ping.textContent = '--';
+            ids.jitter.textContent = '--';
+            ids.down.textContent = '--';
+            ids.up.textContent = '--';
+
+            setStatus('正在测试网络延迟...');
+
+            var latency =
+                await pingTest();
+
+            ids.ping.textContent =
+                latency[0].toFixed(0);
+
+            ids.jitter.textContent =
+                latency[1].toFixed(1);
+
+            setStatus('正在测试下载速度...');
+
+            ids.down.textContent =
+                (await downloadTest()).toFixed(1);
+
+            setStatus('正在测试上传速度...');
+
+            ids.up.textContent =
+                (await uploadTest()).toFixed(1);
+
+            setStatus('测速完成');
+
+        } catch (e) {
+
+            setStatus('测速失败，请稍后重试');
+
+        } finally {
+
+            setBusy(false);
+        }
+    }
+
+    start.addEventListener(
+        'click',
+        run
+    );
+
+    fetch(
+        '/speedtest/info',
+        { cache:'no-store' }
+    )
+    .then(function(r){
+        return r.json();
+    })
+    .then(function(x){
+
+        var s =
+            x.colo
+                ? 'Cloudflare ' + x.colo
+                : '自动选择';
+
+        if (x.country) {
+            s += ' / ' + x.country;
+        }
+
+        document.getElementById('edge')
+            .textContent = s;
+    })
+    .catch(function(){});
+
+})();
+</script>
+
+</body>
+</html>
+`;
     return text;
 }
